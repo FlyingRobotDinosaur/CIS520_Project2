@@ -30,6 +30,12 @@ process_execute (const char *file_name)
 {
   char *fn_copy;
   tid_t tid;
+  char *token, *save_ptr, *argS;
+
+  for(token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)){
+    argS =strncat(argS, token, 100);
+    argS =strncat(argS, " ", 1);
+  }
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
@@ -50,9 +56,13 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
-  char *file_name = file_name_;
+  char *file_name, *token, *save_ptr;
   struct intr_frame if_;
   bool success;
+
+  int argN = 1;
+  file_name = strtok_r(file_name_, " ", &save_ptr);
+
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -65,6 +75,20 @@ start_process (void *file_name_)
   palloc_free_page (file_name);
   if (!success)
     thread_exit ();
+
+    *--if_.esp = filename;
+    while((token = strtok_r(NULL, " ", &save_ptr)) != NULL){
+      argN++;
+      token = strncat(token, "\0", 1);
+      *--if_.esp = token;
+    }
+    *--if_.esp = 0;
+    for(int i = 0; i < argN; i++){
+      *--if_.esp = &(if.esp+(2*argN)+1)
+    }
+    *--if_.esp = &(if_.esp+1)
+    *--if_.esp = argN;
+    *--if_.esp = 0;
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
