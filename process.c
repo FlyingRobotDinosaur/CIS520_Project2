@@ -18,6 +18,8 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+#define MaxArg 20
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
@@ -26,15 +28,19 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name)
+process_execute (const char *file_name_)
 {
-  char *fn_copy;
+  char *fn_copy, *file_name;
   tid_t tid;
   char *token, *save_ptr, *argS;
 
-  for(token = strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)){
-    argS =strncat(argS, token, 100);
-    argS =strncat(argS, " ", 1);
+  strlcpy(file_name, file_name_, strlen(file_name_));
+
+  char *file = strtok_r(file_name, " ", &save_ptr);
+  argS = strlcat(argS, file, strlen(file));
+  while( (token = strtok_r(NULL , " ", &save_ptr)) != NULL ){
+    strlcat(argS, token, strlen(token));
+    strlcat(argS, " ", 1);
   }
 
   /* Make a copy of FILE_NAME.
@@ -42,10 +48,10 @@ process_execute (const char *file_name)
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (fn_copy, argS, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (argS, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy);
   return tid;
@@ -56,12 +62,18 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
-  char *file_name, *token, *save_ptr;
+  char *file_name = file_name_, *token, *save_ptr;
+  char *argray[MaxArg];
+  void *addressray[MaxArg];
   struct intr_frame if_;
   bool success;
+  int argN = 0;
+  int arglen;
 
-  int argN = 1;
-  file_name = strtok_r(file_name_, " ", &save_ptr);
+  char *fileName = strtok_r(file_name, " ", &save_ptr);
+  for(token = fileName; token != NULL && argN <= MaxArg; token = strtok_r(NULL, " ", &save_ptr)){
+    argray[argN++] = strlcat(token, "\0", strlen(token) + 1);
+    }
 
 
   /* Initialize interrupt frame and load executable. */
@@ -69,26 +81,42 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (fileName, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
+
   if (!success)
     thread_exit ();
+  else{
 
-    *--if_.esp = filename;
-    while((token = strtok_r(NULL, " ", &save_ptr)) != NULL){
-      argN++;
-      token = strncat(token, "\0", 1);
-      *--if_.esp = token;
+    for(int i = argN - 1; i >= 0; i--){
+      arglen = strlen(argray[i]) + 1;
+      int moveby = (arglen) / 4;
+      if ((arglen) % 4 != 0)
+        moveby++;
+
+      if_.esp -= 4*moveby;
+      addressray[i] = (if_.esp);
+      memcpy(if_.esp, argray[i], arglen);
     }
-    *--if_.esp = 0;
-    for(int i = 0; i < argN; i++){
-      *--if_.esp = &(if.esp+(2*argN)+1)
+
+    if_.esp -= 4;
+    *(int *)(if_.esp) = 0;
+    for(int i = argN - 1; i >=0; i--){
+      if_.esp -= 4;
+      *(void **)(if_.esp) = addressray[i];
     }
-    *--if_.esp = &(if_.esp+1)
-    *--if_.esp = argN;
-    *--if_.esp = 0;
+
+    if_.esp -= 4;
+    *(char **) (if_.esp) = (if_.esp + 4);
+    if_.esp -= 4;
+    *(int *) (if_.esp)  = argN;
+    if_.esp -= 4;
+    *(int *) (if_.esp)  = 0;
+  }
+
+  palloc_free_page (fileName);
+
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -462,7 +490,7 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE - 12;
+        *esp = PHYS_BASE;
       else
         palloc_free_page (kpage);
     }
