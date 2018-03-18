@@ -1,33 +1,37 @@
 #include "userprog/syscall.h"
 #include <stdio.h>
 #include <syscall-nr.h>
+#include <user/syscall.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "userprog/process.h"
 #include "threads/malloc.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
-#include "threads/pagedir.h"
+#include "userprog/pagedir.h"
 #include "threads/vaddr.h"
 #include "lib/kernel/list.h"
 #include "filesys/inode.h"
 #include "devices/shutdown.h"
 #include "threads/synch.h"
-
-static struct lock fs_lock;
-
-struct fdescriptor {
-  struct file *file;
-  int fd;
-  struct list_elem elem;
-};
+#include "devices/input.h"
 
 
-int addFile (struct file *f);
-struct file* getFile (int fd);
+
 static void syscall_handler (struct intr_frame *);
-void closeFile(int fd);
-struct thread* getChild(int pid);
+struct thread* child;
+struct thread* cur;
+struct file* file;
+char* name;
+unsigned int size;
+int fd;
+int status;
+pid_t pid;
+char* cmd_line;
+uint8_t* bufferR;
+char *bufferw;
+unsigned int i;
+unsigned int p;
 
 void
 syscall_init (void) 
@@ -49,16 +53,16 @@ int callNum = (int) f->esp;
       shutdown_power_off ();
     break;
     case SYS_EXIT:
-	struct thread* cur=thread_current();
-	int status = *(int *)(ptr+1);
+	cur=thread_current();
+	status = *(int *)(ptr+1);
 
 	printf("%s: exit(%d)\n", cur->name, status);
         thread_exit ();
     break;
     case SYS_EXEC:
-	char* cmd_line = *(ptr + 1);
-	pid_t pid = process_execute(cmd_line);
-	struct thread* child = getChild(pid);
+	cmd_line = (char *)(ptr + 1);
+	pid = process_execute(cmd_line);
+	child = getChild(pid);
 	if(!child)
 	{
 		f->eax = -1;
@@ -66,7 +70,7 @@ int callNum = (int) f->esp;
 	}
 	if(child->load == 0)
 	{	
-		sema_down(&cp->loaded);
+		sema_down(&child->loaded);
 	}
 	if(child->load == -1)
 	{
@@ -79,41 +83,34 @@ int callNum = (int) f->esp;
 	f->eax = pid;
     break;
     case SYS_WAIT:
-	pid_t pid =  (pid_t) * (ptr +1)
-	f->eax = process_wait(pid)
+	pid =  (pid_t) * (ptr +1);
+	f->eax = process_wait(pid);
     break;
     case SYS_CREATE:
 	lock_acquire(&fs_lock);
-	char* name = (ptr+1);
-	unsigned size = *(ptr+2);
+	name = (char *)(ptr+1);
+	size = *(ptr+2);
 		
 	if(!name)
 	{
-		sys_exit(-1);
+		f->eax = (-1);
 		break;
 	}	
-	if(!valid(name))
-	{
-		sys_exit(-1);
-	}
+	
 	
 	f->eax = filesys_create(name,size);
 	
     break;
     case SYS_REMOVE:
 
-	char* name = (char *)(ptr+1);
+	name = (char *)(ptr+1);
 	if(!name)
 	{
 		f->eax = false;
-		sys_exit(-1);
+		
 		break;
 	}
-	if(!valid (name))
-	{
-		sys_exit(-1);
-		break;	
-	}
+	
 	else
 		lock_acquire(&fs_lock);
 		f->eax = filesys_remove(name);
@@ -121,17 +118,15 @@ int callNum = (int) f->esp;
     break;
     case SYS_OPEN:
 	lock_acquire(&fs_lock);
-	char* name = *(ptr + 1);
-	int fd;
+	name = (char *)(ptr + 1);
+	
 	if(!name)
 	{ 	lock_release(&fs_lock);
 		f->eax = -1;
 		break;
 	}
-	else if (!valid(name))
-	{lock_release(&fs_lock); sys_exit(-1);}
-
-	struct file *file = filesys_open(name);
+	
+	file = filesys_open(name);
 	
 	if(!file)
 	{
@@ -144,23 +139,23 @@ int callNum = (int) f->esp;
 	lock_release(&fs_lock);	
     break;
     case SYS_FILESIZE:
-	int fd = *(ptr + 1);
-	struct file* file = getFile(fd);
+	fd = *(ptr + 1);
+	file = getFile(fd);
 	if (!file){ f->eax = -1;}
 	else f->eax = file_length(file);
     break;
     case SYS_READ:
 	// check for valid pointers???
-	int fd = *(ptr + 1);
-	struct file* file = getFile(fd);
-	uint8_t* buffer = *(ptr+2);
-	unsigned int size = *(ptr +3);
-	unsigned int i;
+	fd = *(ptr + 1);
+	file = getFile(fd);
+	bufferR =  (uint8_t *)(ptr+2);
+	size = *(ptr +3);
+	
 	if (fd == STDIN_FILENO)
 	{
 		for (i = 0; i < size; i++)
 		{
-	 	 *(uint8_t *)(buffer + i) = input_getc();
+	 	 *(uint8_t *)(bufferR + i) = input_getc();
 		}
 	 f->eax = size;
 	}
@@ -173,19 +168,19 @@ int callNum = (int) f->esp;
 		else 
 		{
 			lock_acquire(&fs_lock);
-			f->eax= file_read (file, buffer, size);
+			f->eax= file_read (file, bufferR, size);
 			lock_release(&fs_lock);
 		}
 	}
     break;
     case SYS_WRITE:
-	int fd =  *(ptr+1);
-	struct file* file = getFile(fd);
-	char *buffer = *(ptr+2);
-	unsigned int size = *(ptr+3);
+	fd =  *(ptr+1);
+	file = getFile(fd);
+	bufferw = (char *)(ptr+2);
+	size = *(ptr+3);
 	if (fd == STDOUT_FILENO) 
-              putbuf (buffer, size);
-	else if (fd = STDIN_FILENO)
+              putbuf (bufferw, size);
+	else if (fd == STDIN_FILENO)
 		{f->eax = -1; break;}
 	else	
 	{
@@ -194,16 +189,16 @@ int callNum = (int) f->esp;
 		else
 		{
 			lock_acquire(&fs_lock);
-			f->eax= file_write (file, buffer, size);
+			f->eax= file_write (file, bufferw, size);
 			lock_release(&fs_lock);
 		}
 	}
     break;
     case SYS_SEEK:
 	lock_acquire(&fs_lock);
-	int fd = *(ptr +1);
-	unsigned int p = *(ptr+2);
-	struct file* file = getFile(fd);
+	fd = *(ptr +1);
+	p = *(ptr+2);
+	file = getFile(fd);
 	
 	if(!file)
 	{
@@ -219,8 +214,8 @@ int callNum = (int) f->esp;
     break;
     case SYS_TELL:
 	lock_acquire(&fs_lock);
-	int fd = *(ptr+1);
-	struct file* file = getFile(fd);
+	fd = *(ptr+1);
+	file = getFile(fd);
 	if(!file)
 	{
 		f->eax= -1;
@@ -233,8 +228,8 @@ int callNum = (int) f->esp;
     break;
     case SYS_CLOSE:
 	lock_acquire(&fs_lock);
-	int fd = (int)*(ptr+1);
-	struct file* file = getFile(fd);
+	fd = (int)*(ptr+1);
+	file = getFile(fd);
 	if (!file)
 	{
 		f->eax= -1;
@@ -253,23 +248,16 @@ int callNum = (int) f->esp;
   }
 }
 
-static void * vaddRead(void *vaddr){
-    if(vaddr != NULL && is_user_vaddr(vaddr)){
-      void *paddr = pagedir_get_page(active_pd(), vaddr);
-      if(paddr != NULL)
-        return paddr;
-    }
-    return (void *) -1;
-  }
+
 
 struct thread* getChild(int pid)
 {
 	struct list_elem *e;
-	struct thread* t = thread_current();
+	struct thread* c = thread_current();
 	
-	for (e = list_begin (&t->children); e != list_end (&t->children); e = list_next (e))
+	for (e = list_begin (&c->children); e != list_end (&c->children); e = list_next (e))
   	{
-	struct thread *childstatus = list_entry(e, struct wait_status, childelem);
+	struct thread *childstatus = list_entry(e, struct thread, childelem);
 	if (childstatus->tid == pid)
         return childstatus;
   	}
@@ -278,10 +266,10 @@ struct thread* getChild(int pid)
 
 void removeChildren(void)
 {
-	struct thread cur* = thread_current();
+	struct thread *c = thread_current();
 	struct list_elem *next;
-	struct list_elem *e = list_begin(&cur->children);
-	while (e != list_end (&cur->children);
+	struct list_elem *e = list_begin(&c->children);
+	while (e != list_end (&c->children))
 	{
 		next = list_next(e);
 		struct thread *t = list_entry (e, struct thread, childelem);
@@ -291,52 +279,4 @@ void removeChildren(void)
 	}
 }
 
-struct file* getFile(int fd)
-{
-  struct list_elem *e;
-  struct thread* t = thread_current();
 
-  for (e = list_begin (&t->fds); e != list_end (&t->fds); e = list_next (e))
-  {
-     struct fdescriptor *f = list_entry(e, struct fdescriptor, elem);
-     if (f->fd == fd)
-        return f->file;
-  }
-
-  return NULL;
-}
-
-int addFile(struct file *fi)
-{
-	struct fdescriptor *f = malloc(sizeof(struct fdescriptor));
-	if(!f){return -1;}
-	f->file = fi;
-	f->fd = thread_current()->fd;
-	thread_current()->fd++;
-	list_push_back(&thread_current()->fds, &f->elem);
-	return f->fd;
-}
-
-void closeFile(int fd)
-{
-	struct thread *t = thread_current();
-	struct list_elem *next;
-	struct list_elem *e = list_begin(&t->fds);
-	while (e != list_end (&t->fds))
-	{
-		next = list_next(e);
-		struct fdescriptor *f = list_entry(e, struct fdescriptor, elem);
-		if( fd == f->fd || fd == -1)
-		{
-			file_close(f->file);
-			list_remove(&f->elem);
-			free(f);
-		
-		}
-		e = next;
-	}
-
-
-}
-
-}
