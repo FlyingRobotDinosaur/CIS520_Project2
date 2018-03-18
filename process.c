@@ -17,6 +17,9 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/init.h"
+
+#define MaxArg 20
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -26,22 +29,32 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *file_name_) 
 {
-  char *fn_copy;
+  char *fn_copy, *file_name;
   tid_t tid;
+  char *token, *save_ptr, *argS;
 
+  strlcopy(file_name, file_name_, strlen(file_name_));
+
+  char *file = strtok_r(file_name, " ", &save_ptr);
+  argS = strlcat(argS, file, strlen(file));
+  while ( (token = strtok_r(NULL , " ", &save_ptr)) != NULL ){
+	strlcat(argS, token, strlen(token));
+	strlcat(argS, " ", 1);
+  }
+  
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (fn_copy, argS, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (argS, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    palloc_free_page (fn_copy);
   return tid;
 }
 
@@ -50,21 +63,70 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
-  char *file_name = file_name_;
+  char *file_name = file_name_, *token, *save_ptr;
+  char *argray[MaxArg];
+  void *addressray[MaxArg];
   struct intr_frame if_;
   bool success;
+  int argN = 0;
+  int arglen;
+
+  char *fileName = strtok_r(file_name, " ", &save_ptr);
+  for(token = fileName; token != NULL && argN <= MaxArg; token = strtok_r(NULL, " ", &save_ptr)){
+	argray[argN++] = strlcat(token, "\0", strlen(token) + 1);
+	}
+
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (fileName, &if_.eip, &if_.esp);
+
+  if (success) {
+	thread_current()->load = 1;
+  	t->exe = filesys_open(fileName);
+	file_deny_write(fileName);
+	}
+
+  else{ thread_current()->load = -1;}
+  sema_up(&thread_current()->loaded);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  //palloc_free_page (file_name);
+  if (!success){
     thread_exit ();
+  else{
+
+	for (int i = argN - 1; i >= 0; i--){
+		arglen = strlen(argray[i]) + 1;
+		int moveby = (arglen) / 4;
+		if ((arglen) % 4 != 0)
+			moveby++;
+
+		if_.esp -= 4*moveby;
+		addressray[i] = (if_.esp);
+		memcpy(if_.esp, argray[i], arglen);
+	}
+
+	if_.esp -= 4;
+	*(int *)(if_.esp) = 0;
+	for(int i = argN -1; i >= 0; i--){
+		if_.esp -= 4;
+		*(void **)(if_.esp) = addressray[i];
+	}
+
+	if_.esp -= 4;
+	*(char **) (if_.esp) = if_.esp + 4);
+	if_.esp -= 4;
+	*(int *) (if_.esp) = argN;
+	if_.esp -= 4;
+	*(int *) (if_.esp) = 0;
+  }
+
+  palloc_free_page (fileName);
+
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -86,14 +148,14 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid) 
+process_wait (tid_t child_tid UNUSED) 
 {
 
 	struct thread *ps = thread_current();
 	int status = -1;
 	
 	struct thread *childthread;
-	childthread = getChild(child_tid); // function found in syscall;
+	childthread = getChild(child_tid); 
 	if(childthread!=initial_thread && childthread->parent==ps)
 	{
 		sema_down(&childthread->dead);
@@ -112,6 +174,26 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  lock_acquire(&fs_lock);
+  closeFile(-1);
+  if (cur->exe)
+    {
+      file_close(cur->exe);
+    }
+  lock_release(&fs_lock);
+
+  
+  removeChildren();
+
+  
+  if(cur!=initial_thread){
+      list_remove(&cur->childelem);
+      file_close(cur->exe);
+      cur->exe=NULL;
+  }
+
+	sema_up(&cur->dead);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -243,7 +325,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       printf ("load: %s: open failed\n", file_name);
       goto done; 
     }
-
+	
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -478,3 +560,4 @@ install_page (void *upage, void *kpage, bool writable)
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
 }
+
