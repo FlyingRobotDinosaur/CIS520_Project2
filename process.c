@@ -15,14 +15,63 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
-#include "threads/init.h"
+#include "userprog/syscall.h"
 
 #define MaxArg 20
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+
+
+struct file* getFile(int fd)
+{
+  struct list_elem *e;
+  struct thread* t = thread_current();
+
+  for (e = list_begin (&t->fds); e != list_end (&t->fds); e = list_next (e))
+  {
+     struct fdescriptor *f = list_entry(e, struct fdescriptor, elem);
+     if (f->fd == fd)
+        return f->file;
+  }
+
+  return NULL;
+}
+
+int addFile(struct file *fi)
+{
+	struct fdescriptor *f = malloc(sizeof(struct fdescriptor));
+	if(!f){return -1;}
+	f->file = fi;
+	f->fd = thread_current()->fd;
+	thread_current()->fd++;
+	list_push_back(&thread_current()->fds, &f->elem);
+	return f->fd;
+}
+
+
+void closeFile(int fd)
+{
+	struct thread *t = thread_current();
+	struct list_elem *next;
+	struct list_elem *e = list_begin(&t->fds);
+	while (e != list_end (&t->fds))
+	{
+		next = list_next(e);
+		struct fdescriptor *f = list_entry(e, struct fdescriptor, elem);
+		if( fd == f->fd || fd == -1)
+		{
+			file_close(f->file);
+			list_remove(&f->elem);
+			free(f);
+		
+		}
+		e = next;
+	}
+}
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -31,11 +80,14 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *file_name_) 
 {
-  char *fn_copy, *file_name;
+  char *fn_copy; 
+  char *file_name;
   tid_t tid;
-  char *token, *save_ptr, *argS;
+  char *token; 
+  char *save_ptr; 
+  char *argS;
 
-  strlcopy(file_name, file_name_, strlen(file_name_));
+  strlcpy(file_name, file_name_, strlen(file_name_));
 
   char *file = strtok_r(file_name, " ", &save_ptr);
   argS = strlcat(argS, file, strlen(file));
@@ -85,9 +137,10 @@ start_process (void *file_name_)
   success = load (fileName, &if_.eip, &if_.esp);
 
   if (success) {
-	thread_current()->load = 1;
+	struct thread *t = thread_current();
+	t->load = 1;
   	t->exe = filesys_open(fileName);
-	file_deny_write(fileName);
+	file_deny_write(t->exe);
 	}
 
   else{ thread_current()->load = -1;}
@@ -96,10 +149,10 @@ start_process (void *file_name_)
   /* If load failed, quit. */
   //palloc_free_page (file_name);
   if (!success){
-    thread_exit ();
+    thread_exit ();}
   else{
-
-	for (int i = argN - 1; i >= 0; i--){
+	int i;
+	for ( i = argN - 1; i >= 0; i--){
 		arglen = strlen(argray[i]) + 1;
 		int moveby = (arglen) / 4;
 		if ((arglen) % 4 != 0)
@@ -112,13 +165,13 @@ start_process (void *file_name_)
 
 	if_.esp -= 4;
 	*(int *)(if_.esp) = 0;
-	for(int i = argN -1; i >= 0; i--){
+	for( i = argN -1; i >= 0; i--){
 		if_.esp -= 4;
 		*(void **)(if_.esp) = addressray[i];
 	}
 
 	if_.esp -= 4;
-	*(char **) (if_.esp) = if_.esp + 4);
+	*(char **) (if_.esp) = (if_.esp + 4);
 	if_.esp -= 4;
 	*(int *) (if_.esp) = argN;
 	if_.esp -= 4;
@@ -156,7 +209,7 @@ process_wait (tid_t child_tid UNUSED)
 	
 	struct thread *childthread;
 	childthread = getChild(child_tid); 
-	if(childthread!=initial_thread && childthread->parent==ps)
+	if( childthread->parent==ps)
 	{
 		sema_down(&childthread->dead);
 		status = childthread->exit_code;
@@ -187,11 +240,11 @@ process_exit (void)
   removeChildren();
 
   
-  if(cur!=initial_thread){
+  
       list_remove(&cur->childelem);
       file_close(cur->exe);
       cur->exe=NULL;
-  }
+  
 
 	sema_up(&cur->dead);
 
