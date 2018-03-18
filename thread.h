@@ -108,9 +108,12 @@ struct thread
 	/* process control */			// initialize these in thread.c
 	int exit_code;
 	struct semaphore dead;
+	struct semaphore loaded;
 	struct list children;
 	struct list_elem childelem;
 	struct thread* parent;
+	struct file* exe;
+	int load;
 
   };
 
